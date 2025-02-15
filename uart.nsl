@@ -1,0 +1,168 @@
+#include "uart.inc"
+/*
+
+    Input clock frequency is expected to 10.000MHz.
+
+*/
+
+
+module uart {
+/* ************************************************************ */
+/* Declare internal signals */
+    wire    BitLength[4] ;
+
+    reg     ShiftCount[4] = 0 ;
+
+    reg     BaudCounter[20] = 0 ;
+    reg     ShiftTiming = 0 ;
+
+    reg     Tx_ShiftReg[12] = 0 ;               // Parallel -> Serial conversion shift register.
+    reg     internal_TxD_out = TRUE ;
+
+    wire    Tx_Parity ;
+
+    reg     internal_READY = TRUE ;
+
+/* ************************************************************ */
+// Procedure description
+//      Declare function and procedure 
+
+    proc_name   capture_TxData() ,                                      //
+                shift_Operation( Tx_ShiftReg ) ,                        //
+                access_complete() ;                                     //
+
+{
+/* ************************************************************ */
+/* Baud rate generator */
+//   This function is activate at Tx_Enable_i will be HIGH.
+    if ( Tx_Enable_i ) {
+        if ( BaudCounter == { Freq_Divide_Param_i , 4'b1111 } ) {
+            BaudCounter := 20'h0 ;                  // Reset baud rate counter
+            ShiftTiming := TRUE ;                   //  and assert Shift Timing indicator.
+        } else {
+            BaudCounter := BaudCounter + 20'b1 ;    // Count up
+            ShiftTiming := FALSE ;
+        }
+    } else {
+        BaudCounter := 20'h0 ;                      // Reset baud rate counter
+        ShiftTiming := FALSE ;                      // Reset Shift Timing indicator.
+    }
+
+/* ************************************************************ */
+/* Bit length check */
+    any {
+        ~Tx_ParityEN_i  : any {         //  without Parity enable
+            Tx_BitLength_i == 2'b00 : BitLength = 4'd7 ;
+                                        //    5bit data length ( Start + Data[4:0] + End )
+            Tx_BitLength_i == 2'b01 : BitLength = 4'd8 ;
+                                        //    6bit data length ( Start + Data[5:0] + End )
+            Tx_BitLength_i == 2'b10 : BitLength = 4'd9 ;
+                                        //    7bit data length ( Start + Data[6:0] + End )
+            else                    : BitLength = 4'd10;
+                                        //    8bit data length ( Start + Data[7:0] + End )
+        }
+        else            : any {         // with Parity enable
+            Tx_BitLength_i == 2'b00 : BitLength = 4'd8 ;
+                                        //    5bit data length ( Start + Data[4:0] + Parity + End )
+            Tx_BitLength_i == 2'b01 : BitLength = 4'd9 ;
+                                        //    6bit data length ( Start + Data[5:0] + Parity + End )
+            Tx_BitLength_i == 2'b10 : BitLength = 4'd10;
+                                        //    7bit data length ( Start + Data[6:0] + Parity + End )
+            else                    : BitLength = 4'd11;
+                                        //    8bit data length ( Start + Data[7:0] + Parity + End )
+        }
+    }
+
+/* ************************************************************ */
+/* Parity generation */
+    any {
+        Tx_OddParity_i  : Tx_Parity = ~^(Tx_Data_i) ;           // Calculate ODD parity
+        else            : Tx_Parity =  ^(Tx_Data_i) ;           // Calculate EVEN parity
+    }
+
+/* ************************************************************ */
+/* Equation for Transmit data output */
+    TxD_o           = internal_TxD_out ;    // output internal shift register value.
+    Tx_Ready_o      = internal_READY ;
+    Tx_ShiftClock_o = ShiftTiming ;
+
+}   // end of equation
+
+/* ************************************************************ */
+// Procedure description
+    function    Tx_Start_i      capture_TxData() ;
+
+/* ************************************************************ */
+/* Transmit operation */
+    proc    capture_TxData {
+    // Invalidate READY flag
+        internal_READY := FALSE ;
+
+    // Set TxD output pin level
+        internal_TxD_out := TRUE ;                              // H-level reset.
+
+    // Initialize shift counter
+        ShiftCount := 4'd0 ;
+
+    // Generate Shift register value.
+        any {
+        // 5bit length
+            Tx_BitLength_i == 2'b00 : {
+                if ( Tx_ParityEN_i ) {                          //  with Parity enable
+                    shift_Operation( { 5#TRUE , Tx_Parity , Tx_Data_i[4:0] , FALSE } ) ;
+                } else {                                        //  without Parity enable
+                    shift_Operation( { 5#TRUE , 1'b1      , Tx_Data_i[4:0] , FALSE } ) ;
+                }
+            }
+        // 6bit length
+            Tx_BitLength_i == 2'b01 : {
+                if ( Tx_ParityEN_i ) {                          //  with Parity enable
+                    shift_Operation( { 4#TRUE , Tx_Parity , Tx_Data_i[5:0] , FALSE } ) ;
+                } else {                                        //  without Parity enable
+                    shift_Operation( { 4#TRUE , 1'b1      , Tx_Data_i[5:0] , FALSE } ) ;
+                }
+            }
+        // 7bit length
+            Tx_BitLength_i == 2'b10 : {
+                if ( Tx_ParityEN_i ) {                          //  with Parity enable
+                    shift_Operation( { 3#TRUE , Tx_Parity , Tx_Data_i[6:0] , FALSE } ) ;
+                } else {                                        //  without Parity enable
+                    shift_Operation( { 3#TRUE , 1'b1      , Tx_Data_i[6:0] , FALSE } ) ;
+                }
+            }
+        // 8bit length
+            else : {
+                if ( Tx_ParityEN_i ) {                          //  with Parity enable
+                    shift_Operation( { 2#TRUE , Tx_Parity , Tx_Data_i[7:0] , FALSE } ) ;
+                } else {                                        //  without Parity enable
+                    shift_Operation( { 2#TRUE , 1'b1      , Tx_Data_i[7:0] , FALSE } ) ;
+                }
+            }
+        }
+    }
+
+    proc    shift_Operation {
+        if ( ShiftTiming ) {
+        // Equation for shift register operation.
+            Tx_ShiftReg := { TRUE , Tx_ShiftReg[11:1] } ;       // Shift operation
+            internal_TxD_out := Tx_ShiftReg[0] ;                // Data output
+
+        // Bit length check
+            ShiftCount := ShiftCount + 4'd1 ;
+            if ( ShiftCount == BitLength ) {
+                access_complete() ;
+            }
+        }
+    }       
+
+    proc    access_complete {
+    // Assert status flag.
+        Tx_Finish_o() ;
+        internal_READY := TRUE ;
+
+    // Procedure finish.
+        finish ;
+    }
+
+/* ************************************************************ */
+}   // end of module
